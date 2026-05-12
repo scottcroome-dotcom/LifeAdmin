@@ -1101,7 +1101,35 @@ function App() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: "2rem", color: "#f87171", fontFamily: "'Syne', sans-serif", background: "#09090b", minHeight: "100vh" }}>
+          <h2 style={{marginTop: "2rem", fontWeight: 800}}>App Crashed</h2>
+          <p style={{ fontSize: "0.85rem", background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", padding: "1rem", borderRadius: "10px", wordBreak: "break-word", lineHeight: 1.5 }}>
+            {this.state.error.toString()}
+          </p>
+          <button
+            onClick={() => { localStorage.clear(); window.location.reload(); }}
+            style={{ marginTop: "1.5rem", padding: "0.85rem", background: "#7c9dff", color: "#fff", border: "none", borderRadius: "10px", fontWeight: "bold", width: "100%", fontSize: "1rem" }}>
+            Clear Local Data & Restart
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <ErrorBoundary>
+    <App/>
+  </ErrorBoundary>
+);
+        
   </script>
 
   <!-- Service Worker registration (PWA offline support) -->

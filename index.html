@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <meta name="theme-color" content="#09090b"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="lifeadmin"/>
+  <meta name="description" content="Your encrypted personal life admin vault"/>
+  <title>lifeadmin</title>
+  <link rel="manifest" href="manifest.json"/>
+
+  <!-- Preconnect for fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body {
+      background: #09090b;
+      color: #e4e4e7;
+      font-family: 'Syne', sans-serif;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: none;
+    }
+    /* Safe area for notched phones */
+    #root { padding-top: env(safe-area-inset-top); }
+    ::-webkit-scrollbar { width: 3px; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+    @keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }
+    @keyframes fadeUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+    .fade { animation: fadeUp 0.22s ease; }
+    input, select, textarea { -webkit-appearance: none; appearance: none; color-scheme: dark; }
+    /* Prevent zoom on input focus (iOS) */
+    input, select, textarea { font-size: 16px !important; }
+    button { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React + Babel via CDN — no build step needed -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CRYPTO ENGINE — AES-256-GCM + PBKDF2 — 100% native Web Crypto API
+// Nothing leaves the device. Deal Finder sends only item name + category.
+// ═══════════════════════════════════════════════════════════════════════════
+const STORAGE_KEY = "la_vault_v2";
+const HINT_KEY    = "la_hint_v2";
+
+async function deriveKey(passphrase, salt) {
+  const enc = new TextEncoder();
+  const km  = await crypto.subtle.importKey("raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name:"PBKDF2", salt, iterations:310000, hash:"SHA-256" },
+    km,
+    { name:"AES-GCM", length:256 },
+    false,
+    ["encrypt","decrypt"]
+  );
+}
+async function encryptData(data, pp) {
+  const salt = crypto.getRandomValues(new Uint8Array(32));
+  const iv   = crypto.getRandomValues(new Uint8Array(12));
+  const key  = await deriveKey(pp, salt);
+  const enc  = new TextEncoder();
+  const ct   = await crypto.subtle.encrypt({name:"AES-GCM",iv}, key, enc.encode(JSON.stringify(data)));
+  const out  = new Uint8Array(32+12+ct.byteLength);
+  out.set(salt,0); out.set(iv,32); out.set(new Uint8Array(ct),44);
+  return btoa(String.fromCharCode(...out));
+}
+async function decryptData(encoded, pp) {
+  try {
+    const raw = new Uint8Array(atob(encoded).split("").map(c=>c.charCodeAt(0)));
+    const key = await deriveKey(pp, raw.slice(0,32));
+    const pt  = await crypto.subtle.decrypt({name:"AES-GCM",iv:raw.slice(32,44)}, key, raw.slice(44));
+    return JSON.parse(new TextDecoder().decode(pt));
+  } catch { return null; }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SEED DATA
+// ═══════════════════════════════════════════════════════════════════════════
+const SEED = {
+  subscriptions:[
+    {id:1,name:"Netflix",category:"Entertainment",cost:17.99,cycle:"monthly",renewalDate:"2026-05-28",notes:"4K plan",autoRenew:true,priceHistory:[{date:"2025-01-01",cost:15.99},{date:"2026-01-01",cost:17.99}]},
+    {id:2,name:"Spotify Family",category:"Entertainment",cost:17.99,cycle:"monthly",renewalDate:"2026-06-01",notes:"6 accounts",autoRenew:true,priceHistory:[]},
+    {id:3,name:"Amazon Prime",category:"Shopping",cost:95.00,cycle:"annual",renewalDate:"2026-09-14",notes:"",autoRenew:true,priceHistory:[]},
+    {id:4,name:"iCloud 200GB",category:"Storage",cost:2.99,cycle:"monthly",renewalDate:"2026-05-19",notes:"",autoRenew:true,priceHistory:[]},
+    {id:5,name:"Microsoft 365",category:"Productivity",cost:79.99,cycle:"annual",renewalDate:"2026-07-22",notes:"Family plan",autoRenew:false,priceHistory:[]},
+    {id:6,name:"Sky Broadband",category:"Utilities",cost:39.00,cycle:"monthly",renewalDate:"2026-05-15",notes:"Contract ends — switch!",autoRenew:false,priceHistory:[{date:"2024-05-15",cost:32.00},{date:"2025-05-15",cost:39.00}]},
+  ],
+  expiries:[
+    {id:1,name:"Passport",category:"Documents",expiryDate:"2027-03-12",reminderDays:180,notes:"Renewal takes 10+ weeks",attachments:[]},
+    {id:2,name:"Driving Licence",category:"Documents",expiryDate:"2035-08-04",reminderDays:90,notes:"",attachments:[]},
+    {id:3,name:"Car Insurance",category:"Insurance",expiryDate:"2026-06-30",reminderDays:30,notes:"Shop around before renewing",attachments:[]},
+    {id:4,name:"MOT",category:"Vehicle",expiryDate:"2026-05-20",reminderDays:14,notes:"Book garage ASAP",attachments:[]},
+    {id:5,name:"Home Insurance",category:"Insurance",expiryDate:"2026-08-15",reminderDays:30,notes:"",attachments:[]},
+    {id:6,name:"Gym Membership",category:"Health",expiryDate:"2026-06-01",reminderDays:14,notes:"Consider switching to PureGym",attachments:[]},
+    {id:7,name:"TV Licence",category:"Documents",expiryDate:"2027-01-01",reminderDays:60,notes:"",attachments:[]},
+    {id:8,name:"Boiler Service",category:"Home",expiryDate:"2026-09-01",reminderDays:30,notes:"Annual service",attachments:[]},
+  ],
+  events:[
+    {id:1,name:"Council Tax Review",category:"Finance",date:"2026-05-22",notes:"Check new band",recurring:false},
+    {id:2,name:"Car Service",category:"Vehicle",date:"2026-05-25",notes:"Full service booked",recurring:false},
+    {id:3,name:"Annual Leave Deadline",category:"Work",date:"2026-12-31",notes:"Use remaining 5 days",recurring:false},
+    {id:4,name:"Self Assessment Deadline",category:"Finance",date:"2027-01-31",notes:"Submit tax return",recurring:true},
+    {id:5,name:"GP Checkup",category:"Health",date:"2026-06-10",notes:"",recurring:false},
+  ],
+  finances:[
+    {id:1,name:"Mortgage",category:"Housing",amount:1050,dueDay:1,type:"expense",notes:"Fixed rate ends Oct 2027"},
+    {id:2,name:"Salary",category:"Income",amount:3200,dueDay:28,type:"income",notes:"Net monthly"},
+    {id:3,name:"Council Tax",category:"Housing",amount:165,dueDay:1,type:"expense",notes:"10 month payments"},
+    {id:4,name:"Gas & Electric",category:"Utilities",amount:120,dueDay:15,type:"expense",notes:"Direct debit"},
+    {id:5,name:"Water",category:"Utilities",amount:38,dueDay:10,type:"expense",notes:""},
+    {id:6,name:"Phone Bill",category:"Utilities",amount:28,dueDay:20,type:"expense",notes:"EE SIM only"},
+    {id:7,name:"Savings Transfer",category:"Savings",amount:400,dueDay:28,type:"savings",notes:"ISA contribution"},
+  ],
+  family:[{id:1,name:"You",relation:"Self",dob:"",colour:"#7c9dff"}],
+  transactions:[],
+  settings:{currency:"£",notifyDays:60},
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UTILS
+// ═══════════════════════════════════════════════════════════════════════════
+const today = new Date(); today.setHours(0,0,0,0);
+const daysUntil = ds => { if(!ds) return null; const d=new Date(ds); d.setHours(0,0,0,0); return Math.round((d-today)/86400000); };
+const urgency   = d  => d===null?"neutral":d<0?"expired":d<=14?"critical":d<=45?"warning":"good";
+const fmtDate   = ds => { if(!ds) return "—"; return new Date(ds).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}); };
+const fmtCur    = (n,c="£") => `${c}${Number(n||0).toFixed(2)}`;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SVG ICONS
+// ═══════════════════════════════════════════════════════════════════════════
+const P = {
+  dashboard:"M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10",
+  subscriptions:"M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z",
+  expiry:"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
+  calendar:"M3 4h18v18H3zM16 2v4M8 2v4M3 10h18",
+  finance:"M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6",
+  bell:"M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9 M13.73 21a2 2 0 0 1-3.46 0",
+  search:"M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z",
+  plus:"M12 5v14M5 12h14",
+  edit:"M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7 M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z",
+  trash:"M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6",
+  x:"M18 6L6 18M6 6l12 12",
+  lock:"M19 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2z M7 11V7a5 5 0 0 1 10 0v4",
+  upload:"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M17 8l-5-5-5 5 M12 3v12",
+  download:"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3",
+  family:"M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M23 21v-2a4 4 0 0 0-3-3.87 M9 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z M16 3.13a4 4 0 0 1 0 7.75",
+  settings:"M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z",
+  ai:"M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 1 1 7.072 0l-.548.547A3.374 3.374 0 0 0 14 18.469V19a2 2 0 1 1-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z",
+  refresh:"M23 4v6h-6 M1 20v-6h6 M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
+  file:"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6",
+  bank:"M3 9l9-7 9 7v11 M9 22V12h6v10 M3 22h18",
+  shield:"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
+};
+const Icon = ({name,size=16}) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    {(P[name]||"").split("M").filter(Boolean).map((p,i)=><path key={i} d={`M${p}`}/>)}
+  </svg>
+);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DESIGN TOKENS (inline — avoids CSS class issues in Babel)
+// ═══════════════════════════════════════════════════════════════════════════
+const T = {
+  bg:"#09090b", surface:"#111113", surface2:"#18181b",
+  border:"rgba(255,255,255,0.06)", text:"#e4e4e7", muted:"#52525b",
+  accent:"#7c9dff", accent2:"#a78bfa",
+  good:"#4ade80", warning:"#fbbf24", critical:"#f87171",
+};
+
+const iS = {
+  width:"100%", background:T.bg, border:`1px solid ${T.border}`,
+  borderRadius:"8px", padding:"0.65rem 0.85rem", color:T.text,
+  fontSize:"16px", boxSizing:"border-box", fontFamily:"'Syne',sans-serif",
+  WebkitAppearance:"none", appearance:"none",
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHARED UI
+// ═══════════════════════════════════════════════════════════════════════════
+function Modal({title,onClose,children}) {
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",backdropFilter:"blur(8px)",zIndex:1000,display:"flex",alignItems:"flex-end",justifyContent:"center",padding:"0"}}>
+      <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"20px 20px 0 0",width:"100%",maxWidth:"560px",maxHeight:"90vh",overflow:"auto",paddingBottom:"env(safe-area-inset-bottom)"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"1.1rem 1.25rem",borderBottom:`1px solid ${T.border}`,position:"sticky",top:0,background:T.surface,zIndex:1}}>
+          <h3 style={{margin:0,fontSize:"0.95rem",color:T.text,fontWeight:700}}>{title}</h3>
+          <button onClick={onClose} style={{background:"none",border:"none",color:T.muted,cursor:"pointer",padding:"6px"}}><Icon name="x" size={18}/></button>
+        </div>
+        <div style={{padding:"1.25rem"}}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function Field({label,children}) {
+  return (
+    <div style={{marginBottom:"0.9rem"}}>
+      <label style={{display:"block",fontSize:"0.68rem",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.09em",color:T.muted,marginBottom:"0.35rem"}}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function Badge({days}) {
+  const u = urgency(days);
+  const cfg = {
+    expired:{bg:"rgba(239,68,68,0.15)",fg:"#ef4444",label:"Expired"},
+    critical:{bg:"rgba(239,68,68,0.1)",fg:"#f87171",label:`${days}d`},
+    warning:{bg:"rgba(245,158,11,0.1)",fg:"#fbbf24",label:`${days}d`},
+    good:{bg:"rgba(74,222,128,0.08)",fg:"#4ade80",label:`${days}d`},
+    neutral:{bg:"rgba(255,255,255,0.04)",fg:"#555",label:"—"},
+  }[u];
+  return <span style={{background:cfg.bg,color:cfg.fg,borderRadius:"6px",padding:"2px 8px",fontSize:"0.7rem",fontWeight:700,whiteSpace:"nowrap",fontFamily:"'DM Mono',monospace"}}>{cfg.label}</span>;
+}
+
+function Btn({children,onClick,variant="primary",size="md",disabled,fullWidth,style:sx={}}) {
+  const vs = {
+    primary:{background:T.accent,color:"#fff",border:"none"},
+    ghost:{background:"none",color:T.muted,border:`1px solid ${T.border}`},
+    danger:{background:"rgba(239,68,68,0.1)",color:"#f87171",border:"1px solid rgba(239,68,68,0.2)"},
+  }[variant];
+  const ss = {sm:{padding:"5px 11px",fontSize:"0.75rem"},md:{padding:"0.5rem 1rem",fontSize:"0.8rem"},lg:{padding:"0.8rem 1.2rem",fontSize:"0.9rem"}}[size];
+  return (
+    <button onClick={onClick} disabled={disabled}
+      style={{borderRadius:"8px",cursor:disabled?"not-allowed":"pointer",fontFamily:"'Syne',sans-serif",fontWeight:700,display:"inline-flex",alignItems:"center",gap:"0.4rem",opacity:disabled?0.5:1,width:fullWidth?"100%":undefined,...vs,...ss,...sx}}>
+      {children}
+    </button>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LOCK SCREEN
+// ═══════════════════════════════════════════════════════════════════════════
+function LockScreen({onUnlock,hasVault}) {
+  const [pass,setPass]       = useState("");
+  const [pass2,setPass2]     = useState("");
+  const [hint,setHint]       = useState("");
+  const [error,setError]     = useState("");
+  const [loading,setLoading] = useState(false);
+  const [showHint,setShowHint] = useState(false);
+  const storedHint = localStorage.getItem(HINT_KEY)||"";
+
+  const submit = async () => {
+    if(!pass) return;
+    if(!hasVault) {
+      if(pass.length<8){setError("Passphrase must be at least 8 characters");return;}
+      if(pass!==pass2){setError("Passphrases don't match");return;}
+    }
+    setLoading(true); setError("");
+    if(hasVault) {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      const d   = await decryptData(raw, pass);
+      if(!d){setError("Wrong passphrase — try again");setLoading(false);return;}
+      onUnlock(d, pass);
+    } else {
+      if(hint) localStorage.setItem(HINT_KEY, hint);
+      onUnlock(null, pass);
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:"#09090b",display:"flex",alignItems:"center",justifyContent:"center",padding:"1.25rem",fontFamily:"'Syne',sans-serif"}}>
+      <div style={{width:"100%",maxWidth:"380px"}}>
+        <div style={{textAlign:"center",marginBottom:"2rem"}}>
+          <div style={{display:"inline-flex",alignItems:"center",justifyContent:"center",width:"60px",height:"60px",background:"rgba(124,157,255,0.12)",border:"1px solid rgba(124,157,255,0.25)",borderRadius:"16px",marginBottom:"1rem"}}>
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#7c9dff" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            </svg>
+          </div>
+          <h1 style={{fontSize:"1.6rem",fontWeight:800,color:"#e8eaf0",letterSpacing:"-0.04em",margin:0}}>
+            <span style={{color:"#7c9dff"}}>life</span>admin
+          </h1>
+          <p style={{color:"#6b7280",fontSize:"0.82rem",marginTop:"0.35rem"}}>
+            {hasVault?"Your vault is locked":"Create your encrypted vault"}
+          </p>
+        </div>
+
+        <div style={{background:"#16181c",border:"1px solid rgba(255,255,255,0.07)",borderRadius:"16px",padding:"1.5rem"}}>
+          <Field label={hasVault?"Passphrase":"Create Passphrase"}>
+            <input type="password" value={pass} onChange={e=>setPass(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&submit()}
+              placeholder={hasVault?"Enter passphrase…":"Min. 8 characters…"}
+              style={{...iS,borderRadius:"10px",padding:"0.8rem 1rem"}} autoFocus/>
+          </Field>
+          {!hasVault && <>
+            <Field label="Confirm Passphrase">
+              <input type="password" value={pass2} onChange={e=>setPass2(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&submit()} placeholder="Repeat passphrase…"
+                style={{...iS,borderRadius:"10px",padding:"0.8rem 1rem"}}/>
+            </Field>
+            <Field label="Hint (optional — stored unencrypted)">
+              <input value={hint} onChange={e=>setHint(e.target.value)} placeholder="Something only you'd know…"
+                style={{...iS,borderRadius:"10px",padding:"0.8rem 1rem"}}/>
+            </Field>
+          </>}
+
+          {error && <div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:"8px",padding:"0.6rem 0.9rem",color:"#f87171",fontSize:"0.82rem",marginBottom:"0.9rem"}}>{error}</div>}
+
+          <button onClick={submit} disabled={loading}
+            style={{width:"100%",background:"#7c9dff",border:"none",borderRadius:"10px",padding:"0.85rem",color:"#fff",fontWeight:800,fontFamily:"inherit",fontSize:"1rem",cursor:"pointer",opacity:loading?0.7:1}}>
+            {loading?"Unlocking…":hasVault?"Unlock Vault":"Create Vault"}
+          </button>
+
+          {hasVault&&storedHint&&(
+            <div style={{marginTop:"0.9rem",textAlign:"center"}}>
+              <button onClick={()=>setShowHint(h=>!h)} style={{background:"none",border:"none",color:"#6b7280",cursor:"pointer",fontSize:"0.78rem"}}>
+                {showHint?"Hide hint":"Show hint"}
+              </button>
+              {showHint&&<p style={{color:"#9ca3af",fontSize:"0.8rem",marginTop:"0.4rem"}}>💡 {storedHint}</p>}
+            </div>
+          )}
+        </div>
+
+        <div style={{marginTop:"1.25rem",display:"flex",gap:"0.5rem",alignItems:"flex-start",padding:"0.85rem 1rem",background:"rgba(74,222,128,0.05)",border:"1px solid rgba(74,222,128,0.15)",borderRadius:"10px"}}>
+          <Icon name="shield" size={14} style={{flexShrink:0,marginTop:"2px",color:"#4ade80"}}/>
+          <p style={{margin:0,fontSize:"0.73rem",color:"#6b7280",lineHeight:1.6}}>
+            <strong style={{color:"#9ca3af"}}>AES-256-GCM</strong> encryption · <strong style={{color:"#9ca3af"}}>PBKDF2</strong> key derivation (310k iterations) · <strong style={{color:"#9ca3af"}}>Zero network activity</strong>. Your data never leaves this device.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AI DEAL FINDER — privacy-safe: sends ONLY name + category
+// ═══════════════════════════════════════════════════════════════════════════
+function DealFinder({item,onClose}) {
+  const [loading,setLoading] = useState(false);
+  const [result,setResult]   = useState(null);
+  const [error,setError]     = useState(null);
+
+  const find = useCallback(async()=>{
+    setLoading(true); setError(null);
+    const prompt = `You are a UK money-saving expert. Find the best deal or alternative for: "${item.name}" (category: "${item.category||"General"}").
+Return ONLY valid JSON, no markdown:
+{"summary":"2-sentence overview","bestAction":"one action","tips":["tip1","tip2","tip3"],"deals":[{"provider":"Name","offer":"Description","estimatedSaving":"£X/year","url":"https://...","rating":4.5}],"compareLinks":[{"name":"Site","url":"https://..."}]}
+Provide 3-4 realistic UK deals. Use real comparison sites.`;
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:prompt}]})
+      });
+      const d = await res.json();
+      const txt = (d.content||[]).map(b=>b.text||"").join("").replace(/```json|```/g,"").trim();
+      setResult(JSON.parse(txt));
+    } catch { setError("Couldn't load deals. Check your connection and try again."); }
+    setLoading(false);
+  },[item.name,item.category]);
+
+  useEffect(()=>{find();},[find]);
+
+  return (
+    <Modal title={`Deals — ${item.name}`} onClose={onClose}>
+      <div style={{marginBottom:"1rem",padding:"0.6rem 0.75rem",background:"rgba(74,222,128,0.05)",border:"1px solid rgba(74,222,128,0.15)",borderRadius:"8px",fontSize:"0.73rem",color:T.muted,display:"flex",gap:"0.5rem",alignItems:"center"}}>
+        <Icon name="shield" size={12}/> Only the item name and category were sent — no personal or financial data.
+      </div>
+      {loading&&<div style={{textAlign:"center",padding:"2rem",color:T.muted}}>
+        <div style={{fontSize:"1.8rem",animation:"spin 1s linear infinite",display:"inline-block"}}>⟳</div>
+        <p style={{marginTop:"0.6rem",fontSize:"0.875rem"}}>Searching for deals…</p>
+      </div>}
+      {error&&<div style={{color:T.critical,textAlign:"center",padding:"1rem",fontSize:"0.875rem"}}>{error}</div>}
+      {result&&<div style={{display:"flex",flexDirection:"column",gap:"1rem"}}>
+        <div style={{background:T.bg,borderRadius:"10px",padding:"0.9rem",borderLeft:`3px solid ${T.accent}`}}>
+          <p style={{margin:0,fontSize:"0.85rem",lineHeight:1.65,color:T.text}}>{result.summary}</p>
+        </div>
+        <div style={{background:"rgba(74,222,128,0.07)",border:"1px solid rgba(74,222,128,0.2)",borderRadius:"8px",padding:"0.7rem 0.9rem",color:T.good,fontSize:"0.85rem"}}>✓ {result.bestAction}</div>
+        <div>
+          <p style={{margin:"0 0 0.5rem",fontSize:"0.68rem",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.09em",color:T.muted}}>Deals Found</p>
+          {result.deals?.map((d,i)=>(
+            <a key={i} href={d.url} target="_blank" rel="noopener noreferrer"
+              style={{textDecoration:"none",background:T.bg,border:`1px solid ${T.border}`,borderRadius:"10px",padding:"0.8rem",display:"flex",alignItems:"center",gap:"0.75rem",marginBottom:"0.4rem"}}>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:"0.875rem",color:T.text}}>{d.provider} <span style={{fontSize:"0.68rem",color:T.muted}}>{"★".repeat(Math.round(d.rating||4))}</span></div>
+                <p style={{margin:0,fontSize:"0.78rem",color:T.muted}}>{d.offer}</p>
+              </div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{fontWeight:700,color:T.good,fontSize:"0.82rem"}}>{d.estimatedSaving}</div>
+                <div style={{fontSize:"0.7rem",color:T.accent}}>View →</div>
+              </div>
+            </a>
+          ))}
+        </div>
+        <ul style={{margin:0,paddingLeft:"1.2rem",color:T.muted,fontSize:"0.82rem",lineHeight:1.9}}>
+          {result.tips?.map((t,i)=><li key={i}>{t}</li>)}
+        </ul>
+        {result.compareLinks?.length>0&&<div style={{display:"flex",gap:"0.4rem",flexWrap:"wrap"}}>
+          {result.compareLinks.map((l,i)=>(
+            <a key={i} href={l.url} target="_blank" rel="noopener noreferrer"
+              style={{background:T.bg,border:`1px solid ${T.border}`,borderRadius:"6px",padding:"0.3rem 0.65rem",fontSize:"0.78rem",color:T.accent,textDecoration:"none"}}>{l.name} ↗</a>
+          ))}
+        </div>}
+        <Btn variant="ghost" onClick={find} fullWidth><Icon name="refresh" size={13}/> Refresh Deals</Btn>
+      </div>}
+    </Modal>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BANK IMPORT
+// ═══════════════════════════════════════════════════════════════════════════
+function BankImport({onImport,onClose}) {
+  const [rows,setRows]         = useState([]);
+  const [detected,setDetected] = useState([]);
+  const [step,setStep]         = useState(1);
+  const ref = useRef();
+
+  const parseCSV = txt => {
+    const lines = txt.trim().split("\n").filter(l=>l.trim());
+    if(lines.length<2) return [];
+    const headers = lines[0].split(",").map(h=>h.replace(/"/g,"").trim().toLowerCase());
+    return lines.slice(1).map(line=>{
+      const vals=line.split(",").map(v=>v.replace(/"/g,"").trim());
+      const obj={}; headers.forEach((h,i)=>obj[h]=vals[i]||""); return obj;
+    });
+  };
+
+  const handleFile = e => {
+    const file=e.target.files[0]; if(!file) return;
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      const parsed=parseCSV(ev.target.result);
+      setRows(parsed);
+      const counts={};
+      parsed.forEach(r=>{
+        const desc=(r.description||r.narrative||r.details||r.payee||"").toLowerCase();
+        if(desc) counts[desc]=(counts[desc]||0)+1;
+      });
+      setDetected(Object.entries(counts).filter(([,c])=>c>=2).map(([name])=>({name,selected:true,category:"Entertainment"})));
+      setStep(2);
+    };
+    reader.readAsText(file);
+  };
+
+  return (
+    <Modal title="Import Bank CSV" onClose={onClose}>
+      {step===1&&<div style={{textAlign:"center",padding:"1rem 0"}}>
+        <div style={{fontSize:"2.5rem",marginBottom:"0.75rem"}}>🏦</div>
+        <p style={{color:T.muted,fontSize:"0.85rem",marginBottom:"1.25rem",lineHeight:1.7}}>
+          Export a CSV from your bank app and upload it here.<br/>
+          <strong style={{color:T.text}}>Everything stays on your device.</strong>
+        </p>
+        <div style={{background:T.bg,border:`2px dashed ${T.border}`,borderRadius:"12px",padding:"1.75rem",cursor:"pointer"}} onClick={()=>ref.current.click()}>
+          <Icon name="upload" size={24}/>
+          <div style={{color:T.muted,fontSize:"0.85rem",marginTop:"0.6rem"}}>Tap to choose CSV file</div>
+        </div>
+        <input ref={ref} type="file" accept=".csv" style={{display:"none"}} onChange={handleFile}/>
+        <p style={{marginTop:"0.75rem",fontSize:"0.72rem",color:T.muted}}>Monzo · Starling · HSBC · Barclays · Lloyds · NatWest · Santander</p>
+      </div>}
+      {step===2&&<div>
+        <p style={{color:T.muted,fontSize:"0.84rem",marginBottom:"0.9rem"}}>{rows.length} transactions · {detected.length} recurring detected</p>
+        <div style={{display:"flex",flexDirection:"column",gap:"0.4rem",marginBottom:"1rem",maxHeight:"250px",overflow:"auto"}}>
+          {detected.map((r,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:"0.7rem",background:T.bg,borderRadius:"8px",padding:"0.6rem 0.8rem",border:`1px solid ${r.selected?T.accent:T.border}`}}>
+              <input type="checkbox" checked={r.selected} onChange={()=>setDetected(d=>d.map((x,j)=>j===i?{...x,selected:!x.selected}:x))} style={{accentColor:T.accent,width:"16px",height:"16px"}}/>
+              <span style={{flex:1,fontSize:"0.875rem",textTransform:"capitalize"}}>{r.name}</span>
+              <select value={r.category} onChange={e=>setDetected(d=>d.map((x,j)=>j===i?{...x,category:e.target.value}:x))}
+                style={{...iS,width:"auto",padding:"3px 6px",fontSize:"0.75rem"}}>
+                {["Entertainment","Shopping","Utilities","Storage","Productivity","Health","Finance","Other"].map(c=><option key={c}>{c}</option>)}
+              </select>
+            </div>
+          ))}
+          {!detected.length&&<p style={{color:T.muted,textAlign:"center",padding:"1rem",fontSize:"0.875rem"}}>No recurring transactions found. Try a longer date range export.</p>}
+        </div>
+        <div style={{display:"flex",gap:"0.6rem"}}>
+          <Btn variant="ghost" onClick={()=>setStep(1)}>Back</Btn>
+          <Btn onClick={()=>{onImport(detected.filter(r=>r.selected));onClose();}}>
+            Add {detected.filter(r=>r.selected).length} Subs
+          </Btn>
+        </div>
+      </div>}
+    </Modal>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRICE HISTORY SPARKLINE
+// ═══════════════════════════════════════════════════════════════════════════
+function Sparkline({history,current,name}) {
+  if(!history||!history.length) return <p style={{color:T.muted,fontSize:"0.8rem"}}>No price history recorded yet.</p>;
+  const all=[...history,{date:new Date().toISOString().slice(0,10),cost:current}];
+  const max=Math.max(...all.map(h=>h.cost)), min=Math.min(...all.map(h=>h.cost)), range=max-min||1;
+  const W=320,H=90,PAD=18;
+  const pts=all.map((p,i)=>[PAD+(i/(all.length-1||1))*(W-PAD*2), PAD+(1-(p.cost-min)/range)*(H-PAD*2), p]);
+  const pathD=pts.map((p,i)=>`${i===0?"M":"L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  const delta=all[all.length-1].cost-all[0].cost;
+  return (
+    <div style={{marginBottom:"0.75rem"}}>
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:"0.72rem",color:T.muted,marginBottom:"0.4rem"}}>
+        <span>Price history</span>
+        <span style={{color:delta>0?T.critical:delta<0?T.good:T.muted,fontWeight:700}}>{delta>0?"+":""}{fmtCur(delta)} total change</span>
+      </div>
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{width:"100%",overflow:"visible"}}>
+        <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={T.accent} stopOpacity="0.25"/><stop offset="100%" stopColor={T.accent} stopOpacity="0"/></linearGradient></defs>
+        <path d={`${pathD} L${pts[pts.length-1][0]},${H} L${pts[0][0]},${H} Z`} fill="url(#sg)"/>
+        <path d={pathD} fill="none" stroke={T.accent} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+        {pts.map(([x,y,p],i)=>(
+          <g key={i}>
+            <circle cx={x} cy={y} r="3.5" fill={T.accent} stroke={T.surface} strokeWidth="2"/>
+            <text x={x} y={y-9} textAnchor="middle" fontSize="9" fill={T.muted}>{fmtCur(p.cost)}</text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DOC ATTACHER
+// ═══════════════════════════════════════════════════════════════════════════
+function DocAttacher({attachments=[],onChange}) {
+  const ref=useRef();
+  const add=e=>{
+    const file=e.target.files[0]; if(!file) return;
+    if(file.size>5*1024*1024){alert("Max 5MB");return;}
+    const reader=new FileReader();
+    reader.onload=ev=>onChange([...attachments,{name:file.name,type:file.type,data:ev.target.result,addedAt:new Date().toISOString()}]);
+    reader.readAsDataURL(file);
+  };
+  return (
+    <div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:"0.4rem",marginBottom:attachments.length?"0.5rem":0}}>
+        {attachments.map((a,i)=>(
+          <div key={i} style={{background:T.bg,border:`1px solid ${T.border}`,borderRadius:"8px",padding:"0.35rem 0.7rem",display:"flex",alignItems:"center",gap:"0.4rem",fontSize:"0.75rem"}}>
+            <Icon name="file" size={12}/><span>{a.name}</span>
+            <button onClick={()=>onChange(attachments.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:T.critical,cursor:"pointer",padding:"0 2px",fontSize:"1rem",lineHeight:1}}>×</button>
+          </div>
+        ))}
+      </div>
+      <button onClick={()=>ref.current.click()}
+        style={{background:"none",border:`1px dashed ${T.border}`,borderRadius:"8px",padding:"0.5rem 0.85rem",color:T.muted,cursor:"pointer",fontSize:"0.8rem",display:"flex",alignItems:"center",gap:"0.4rem",fontFamily:"'Syne',sans-serif"}}>
+        <Icon name="upload" size={13}/> Attach document (encrypted)
+      </button>
+      <input ref={ref} type="file" accept="image/*,.pdf" style={{display:"none"}} onChange={add}/>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BOTTOM NAV (mobile-first)
+// ═══════════════════════════════════════════════════════════════════════════
+function BottomNav({view,setView,urgentCount}) {
+  const tabs=[
+    {id:"dashboard",label:"Home",icon:"dashboard"},
+    {id:"subscriptions",label:"Subs",icon:"subscriptions"},
+    {id:"expiries",label:"Expiry",icon:"expiry"},
+    {id:"alerts",label:`Alerts${urgentCount>0?` ${urgentCount}`:""}`,icon:"bell"},
+    {id:"more",label:"More",icon:"settings"},
+  ];
+  return (
+    <nav style={{position:"fixed",bottom:0,left:0,right:0,background:T.surface,borderTop:`1px solid ${T.border}`,display:"flex",zIndex:100,paddingBottom:"env(safe-area-inset-bottom)"}}>
+      {tabs.map(t=>(
+        <button key={t.id} onClick={()=>setView(t.id)}
+          style={{flex:1,background:"none",border:"none",padding:"0.6rem 0.25rem 0.5rem",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:"3px",color:view===t.id?T.accent:T.muted,transition:"color 0.15s",fontFamily:"'Syne',sans-serif"}}>
+          <Icon name={t.icon} size={20}/>
+          <span style={{fontSize:"0.62rem",fontWeight:view===t.id?700:400,letterSpacing:"0.02em"}}>{t.label}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MORE MENU (overlay for extra screens)
+// ═══════════════════════════════════════════════════════════════════════════
+function MoreMenu({setView,onClose}) {
+  const items=[
+    {id:"events",label:"Events & Deadlines",icon:"calendar"},
+    {id:"finances",label:"Finances",icon:"finance"},
+    {id:"family",label:"Family",icon:"family"},
+    {id:"settings",label:"Settings & Security",icon:"settings"},
+  ];
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",backdropFilter:"blur(8px)",zIndex:500}} onClick={onClose}>
+      <div style={{position:"absolute",bottom:0,left:0,right:0,background:T.surface,borderRadius:"20px 20px 0 0",padding:"1rem 1rem calc(1rem + env(safe-area-inset-bottom))",border:`1px solid ${T.border}`}} onClick={e=>e.stopPropagation()}>
+        <div style={{width:"36px",height:"4px",background:T.border,borderRadius:"2px",margin:"0 auto 1rem"}}/>
+        {items.map(item=>(
+          <button key={item.id} onClick={()=>{setView(item.id);onClose();}}
+            style={{width:"100%",background:"none",border:"none",borderRadius:"10px",padding:"0.8rem 1rem",display:"flex",alignItems:"center",gap:"0.75rem",color:T.text,cursor:"pointer",fontSize:"0.9rem",fontWeight:600,fontFamily:"'Syne',sans-serif",marginBottom:"0.25rem",textAlign:"left"}}>
+            <div style={{width:"36px",height:"36px",borderRadius:"10px",background:`rgba(124,157,255,0.1)`,display:"flex",alignItems:"center",justifyContent:"center",color:T.accent}}>
+              <Icon name={item.icon} size={17}/>
+            </div>
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════════════════════
+function App() {
+  const [locked,setLocked]     = useState(true);
+  const [passphrase,setPP]     = useState("");
+  const [data,setData]         = useState(null);
+  const [view,setView]         = useState("dashboard");
+  const [dealItem,setDealItem] = useState(null);
+  const [modal,setModal]       = useState(null);
+  const [form,setForm]         = useState({});
+  const [showImport,setShowImport] = useState(false);
+  const [showMore,setShowMore] = useState(false);
+  const [saving,setSaving]     = useState(false);
+  const hasVault = !!localStorage.getItem(STORAGE_KEY);
+  const saveTimer = useRef(null);
+
+  // Auto-save encrypted
+  const persist = useCallback(async(d,pp)=>{
+    if(!pp||!d) return;
+    setSaving(true);
+    localStorage.setItem(STORAGE_KEY, await encryptData(d,pp));
+    setSaving(false);
+  },[]);
+
+  useEffect(()=>{
+    if(!data||!passphrase) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current=setTimeout(()=>persist(data,passphrase),800);
+  },[data,passphrase,persist]);
+
+  const unlock = (d,pp)=>{ setPP(pp); setData(d||SEED); setLocked(false); };
+  const lock   = ()=>{ setLocked(true); setData(null); setPP(""); };
+  const upd    = fn => setData(d=>fn({...d}));
+  const updF   = (k,v) => setForm(f=>({...f,[k]:v}));
+
+  if(locked) return <LockScreen onUnlock={unlock} hasVault={hasVault}/>;
+  if(!data)  return null;
+
+  // Computed
+  const allAlerts=[
+    ...data.subscriptions.map(s=>({...s,kind:"subscription",days:daysUntil(s.renewalDate)})),
+    ...data.expiries.map(e=>({...e,kind:"expiry",days:daysUntil(e.expiryDate)})),
+    ...data.events.map(e=>({...e,kind:"event",days:daysUntil(e.date)})),
+  ].filter(a=>a.days!==null&&a.days<=(data.settings?.notifyDays||60)&&a.days>=-7)
+   .sort((a,b)=>a.days-b.days);
+
+  const urgentCount = allAlerts.filter(a=>a.days<=14).length;
+  const monthlySubCost = data.subscriptions.reduce((s,sub)=>s+(sub.cycle==="annual"?sub.cost/12:sub.cycle==="quarterly"?sub.cost/3:sub.cost),0);
+  const monthlyIncome   = data.finances.filter(f=>f.type==="income").reduce((s,f)=>s+f.amount,0);
+  const monthlyExpenses = data.finances.filter(f=>f.type==="expense").reduce((s,f)=>s+f.amount,0);
+  const monthlySavings  = data.finances.filter(f=>f.type==="savings").reduce((s,f)=>s+f.amount,0);
+  const disposable = monthlyIncome-monthlyExpenses-monthlySavings-monthlySubCost;
+  const cur = data.settings?.currency||"£";
+
+  // CRUD helpers
+  const openAdd  = type => { setForm({}); setModal({type,item:null}); };
+  const openEdit = (type,item) => { setForm({...item}); setModal({type,item}); };
+  const closeModal = () => setModal(null);
+  const saveItem = col => {
+    upd(d=>{
+      const items=d[col];
+      if(modal.item) return {...d,[col]:items.map(i=>i.id===modal.item.id?{...i,...form}:i)};
+      return {...d,[col]:[...items,{...form,id:Math.max(0,...items.map(i=>i.id))+1}]};
+    });
+    closeModal();
+  };
+  const del = (col,id) => upd(d=>({...d,[col]:d[col].filter(i=>i.id!==id)}));
+
+  // Export / Import
+  const exportVault = async()=>{
+    const enc=localStorage.getItem(STORAGE_KEY); if(!enc) return;
+    const blob=new Blob([enc],{type:"application/octet-stream"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a"); a.href=url; a.download=`lifeadmin-${new Date().toISOString().slice(0,10)}.vault`; a.click(); URL.revokeObjectURL(url);
+  };
+  const importRef=useRef();
+  const importVault=e=>{
+    const file=e.target.files[0]; if(!file) return;
+    const reader=new FileReader();
+    reader.onload=async ev=>{
+      const d=await decryptData(ev.target.result,passphrase);
+      if(!d){alert("Wrong passphrase or invalid file.");return;}
+      setData(d); alert("Vault restored.");
+    };
+    reader.readAsText(file);
+  };
+
+  const handleBankImport=subs=>{
+    upd(d=>{
+      const newSubs=subs.map((s,i)=>({id:Math.max(0,...d.subscriptions.map(x=>x.id))+i+1,name:s.name.charAt(0).toUpperCase()+s.name.slice(1),category:s.category,cost:0,cycle:"monthly",renewalDate:"",notes:"Imported from bank",autoRenew:true,priceHistory:[]}));
+      return {...d,subscriptions:[...d.subscriptions,...newSubs]};
+    });
+  };
+
+  // Handle "more" tab
+  const handleSetView = v => {
+    if(v==="more"){ setShowMore(true); return; }
+    setView(v);
+  };
+
+  // ── VIEWS ──────────────────────────────────────────────
+  const card=(children,sx={})=>(
+    <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"12px",padding:"1rem 1.1rem",...sx}}>{children}</div>
+  );
+  const sectionLabel=txt=><p style={{margin:"0 0 0.5rem",fontSize:"0.68rem",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.09em",color:T.muted}}>{txt}</p>;
+  const row=(children,sx={})=>(
+    <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"10px",padding:"0.8rem 0.9rem",display:"flex",alignItems:"center",gap:"0.7rem",marginBottom:"0.4rem",...sx}}>{children}</div>
+  );
+
+  const Dashboard=()=>(
+    <div style={{display:"flex",flexDirection:"column",gap:"0.9rem"}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.6rem"}}>
+        {[
+          {label:"Monthly Subs",val:fmtCur(monthlySubCost,cur),c:T.accent},
+          {label:"Disposable",val:fmtCur(disposable,cur),c:disposable>=0?T.good:T.critical},
+          {label:"Urgent Alerts",val:urgentCount,c:T.warning},
+          {label:"Items Tracked",val:data.subscriptions.length+data.expiries.length+data.events.length,c:T.accent2},
+        ].map((s,i)=>(
+          <div key={i} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"12px",padding:"0.9rem 1rem"}}>
+            <div style={{fontSize:"0.65rem",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.09em",color:T.muted,marginBottom:"0.4rem"}}>{s.label}</div>
+            <div style={{fontSize:"1.4rem",fontWeight:800,color:s.c,lineHeight:1,fontFamily:"'Syne',sans-serif"}}>{s.val}</div>
+          </div>
+        ))}
+      </div>
+      {card(<>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"0.75rem"}}>
+          {sectionLabel("Action Required")}
+          <button onClick={()=>setView("alerts")} style={{background:"none",border:"none",color:T.accent,cursor:"pointer",fontSize:"0.75rem",fontFamily:"'Syne',sans-serif"}}>All →</button>
+        </div>
+        {allAlerts.filter(a=>a.days<=30).length===0
+          ?<p style={{color:T.muted,fontSize:"0.85rem"}}>Nothing urgent ✓</p>
+          :allAlerts.filter(a=>a.days<=30).slice(0,6).map((a,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:"0.65rem",padding:"0.55rem 0.65rem",background:T.bg,borderRadius:"8px",marginBottom:"0.35rem"}}>
+              <Badge days={a.days}/>
+              <div style={{flex:1,minWidth:0,overflow:"hidden"}}>
+                <div style={{fontSize:"0.875rem",fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{a.name}</div>
+                <div style={{fontSize:"0.7rem",color:T.muted,textTransform:"capitalize"}}>{a.kind}</div>
+              </div>
+              {(a.kind==="subscription"||a.kind==="expiry")&&(
+                <button onClick={()=>setDealItem(a)} style={{background:"none",border:`1px solid ${T.border}`,borderRadius:"6px",padding:"3px 9px",color:T.accent,cursor:"pointer",fontSize:"0.72rem",fontFamily:"'Syne',sans-serif",whiteSpace:"nowrap"}}>Deals</button>
+              )}
+            </div>
+          ))
+        }
+      </>)}
+      {card(<>
+        {sectionLabel("Finance Snapshot")}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:"0.5rem",marginBottom:"0.6rem"}}>
+          {[{l:"Income",v:monthlyIncome,c:T.good},{l:"Bills",v:monthlyExpenses,c:T.critical},{l:"Subs",v:monthlySubCost,c:T.accent},{l:"Savings",v:monthlySavings,c:T.accent2}].map((f,i)=>(
+            <div key={i} style={{textAlign:"center",padding:"0.6rem 0.25rem",background:T.bg,borderRadius:"8px"}}>
+              <div style={{fontSize:"0.6rem",color:T.muted,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:"0.3rem"}}>{f.l}</div>
+              <div style={{fontSize:"0.82rem",fontWeight:800,color:f.c,fontFamily:"'DM Mono',monospace"}}>{fmtCur(f.v,cur)}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{padding:"0.55rem 0.75rem",background:T.bg,borderRadius:"8px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:"0.78rem",color:T.muted}}>Disposable</span>
+          <span style={{fontWeight:800,color:disposable>=0?T.good:T.critical,fontFamily:"'DM Mono',monospace",fontSize:"0.9rem"}}>{fmtCur(disposable,cur)}/mo</span>
+        </div>
+      </>)}
+    </div>
+  );
+
+  const Subscriptions=()=>(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.75rem"}}>
+        <div>
+          <h2 style={{margin:0,fontSize:"1.1rem",fontWeight:800}}>Subscriptions</h2>
+          <p style={{margin:0,color:T.muted,fontSize:"0.75rem"}}>{fmtCur(monthlySubCost,cur)}/mo · {fmtCur(monthlySubCost*12,cur)}/yr</p>
+        </div>
+        <div style={{display:"flex",gap:"0.4rem"}}>
+          <Btn variant="ghost" size="sm" onClick={()=>setShowImport(true)}><Icon name="bank" size={12}/></Btn>
+          <Btn size="sm" onClick={()=>openAdd("subscriptions")}><Icon name="plus" size={12}/> Add</Btn>
+        </div>
+      </div>
+      {data.subscriptions.sort((a,b)=>daysUntil(a.renewalDate)-daysUntil(b.renewalDate)).map(s=>(
+        <div key={s.id} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"10px",padding:"0.8rem 0.9rem",marginBottom:"0.4rem"}}>
+          <div style={{display:"flex",alignItems:"center",gap:"0.65rem"}}>
+            <Badge days={daysUntil(s.renewalDate)}/>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:700,fontSize:"0.875rem",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</div>
+              <div style={{fontSize:"0.72rem",color:T.muted}}>Renews {fmtDate(s.renewalDate)} · {s.cycle}</div>
+            </div>
+            <div style={{textAlign:"right",flexShrink:0}}>
+              <div style={{fontWeight:800,fontFamily:"'DM Mono',monospace",fontSize:"0.85rem"}}>{fmtCur(s.cost,cur)}</div>
+              <div style={{fontSize:"0.65rem",color:T.muted}}>{s.cycle==="annual"?`${fmtCur(s.cost/12,cur)}/mo`:`${fmtCur(s.cost*12,cur)}/yr`}</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:"0.4rem",marginTop:"0.6rem",justifyContent:"flex-end"}}>
+            <Btn size="sm" variant="ghost" onClick={()=>setDealItem({...s,kind:"subscription"})}><Icon name="ai" size={11}/> Deals</Btn>
+            <Btn size="sm" variant="ghost" onClick={()=>openEdit("subscriptions",s)}><Icon name="edit" size={11}/></Btn>
+            <Btn size="sm" variant="danger" onClick={()=>del("subscriptions",s.id)}><Icon name="trash" size={11}/></Btn>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
+  const Expiries=()=>(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.75rem"}}>
+        <h2 style={{margin:0,fontSize:"1.1rem",fontWeight:800}}>Expiry Tracker</h2>
+        <Btn size="sm" onClick={()=>openAdd("expiries")}><Icon name="plus" size={12}/> Add</Btn>
+      </div>
+      {data.expiries.sort((a,b)=>daysUntil(a.expiryDate)-daysUntil(b.expiryDate)).map(e=>(
+        <div key={e.id} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"10px",padding:"0.8rem 0.9rem",marginBottom:"0.4rem"}}>
+          <div style={{display:"flex",alignItems:"center",gap:"0.65rem"}}>
+            <Badge days={daysUntil(e.expiryDate)}/>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:700,fontSize:"0.875rem"}}>{e.name} {e.attachments?.length>0&&<span style={{fontSize:"0.65rem",color:T.accent}}>📎{e.attachments.length}</span>}</div>
+              <div style={{fontSize:"0.72rem",color:T.muted}}>Expires {fmtDate(e.expiryDate)}</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:"0.4rem",marginTop:"0.6rem",justifyContent:"flex-end"}}>
+            <Btn size="sm" variant="ghost" onClick={()=>setDealItem({...e,kind:"expiry"})}><Icon name="ai" size={11}/> Deals</Btn>
+            <Btn size="sm" variant="ghost" onClick={()=>openEdit("expiries",e)}><Icon name="edit" size={11}/></Btn>
+            <Btn size="sm" variant="danger" onClick={()=>del("expiries",e.id)}><Icon name="trash" size={11}/></Btn>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
+  const Alerts=()=>(
+    <div>
+      <h2 style={{margin:"0 0 0.25rem",fontSize:"1.1rem",fontWeight:800}}>Smart Alerts</h2>
+      <p style={{color:T.muted,fontSize:"0.75rem",marginBottom:"0.9rem"}}>Within {data.settings?.notifyDays||60} days</p>
+      {allAlerts.length===0
+        ?<div style={{textAlign:"center",padding:"3rem",color:T.muted}}><div style={{fontSize:"2rem"}}>✓</div><p style={{marginTop:"0.5rem"}}>All clear!</p></div>
+        :allAlerts.map((a,i)=>(
+          <div key={i} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"10px",padding:"0.8rem 0.9rem",marginBottom:"0.4rem"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"0.65rem"}}>
+              <Badge days={a.days}/>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:"0.875rem"}}>{a.name}</div>
+                <div style={{fontSize:"0.72rem",color:T.muted,textTransform:"capitalize"}}>{a.kind} · {a.kind==="subscription"?fmtDate(a.renewalDate):a.kind==="expiry"?fmtDate(a.expiryDate):fmtDate(a.date)}</div>
+              </div>
+              {(a.kind==="subscription"||a.kind==="expiry")&&(
+                <Btn size="sm" variant="ghost" onClick={()=>setDealItem(a)}><Icon name="ai" size={11}/></Btn>
+              )}
+            </div>
+          </div>
+        ))
+      }
+    </div>
+  );
+
+  const Events=()=>(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.75rem"}}>
+        <h2 style={{margin:0,fontSize:"1.1rem",fontWeight:800}}>Events & Deadlines</h2>
+        <Btn size="sm" onClick={()=>openAdd("events")}><Icon name="plus" size={12}/> Add</Btn>
+      </div>
+      {data.events.sort((a,b)=>new Date(a.date)-new Date(b.date)).map(e=>(
+        row(<>
+          <Badge days={daysUntil(e.date)}/>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontWeight:700,fontSize:"0.875rem"}}>{e.name} {e.recurring&&<span style={{fontSize:"0.65rem",color:T.accent2}}>↻</span>}</div>
+            <div style={{fontSize:"0.72rem",color:T.muted}}>{fmtDate(e.date)}{e.notes&&` · ${e.notes}`}</div>
+          </div>
+          <Btn size="sm" variant="ghost" onClick={()=>openEdit("events",e)}><Icon name="edit" size={11}/></Btn>
+          <Btn size="sm" variant="danger" onClick={()=>del("events",e.id)}><Icon name="trash" size={11}/></Btn>
+        </>, {key:e.id})
+      ))}
+    </div>
+  );
+
+  const Finances=()=>(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.75rem"}}>
+        <div>
+          <h2 style={{margin:0,fontSize:"1.1rem",fontWeight:800}}>Finances</h2>
+          <p style={{margin:0,color:T.muted,fontSize:"0.75rem"}}>Disposable: <span style={{color:disposable>=0?T.good:T.critical,fontWeight:700}}>{fmtCur(disposable,cur)}/mo</span></p>
+        </div>
+        <Btn size="sm" onClick={()=>openAdd("finances")}><Icon name="plus" size={12}/> Add</Btn>
+      </div>
+      {["income","expense","savings"].map(type=>{
+        const items=data.finances.filter(f=>f.type===type);
+        const total=items.reduce((s,f)=>s+f.amount,0);
+        const c={income:T.good,expense:T.critical,savings:T.accent2}[type];
+        if(!items.length) return null;
+        return <div key={type} style={{marginBottom:"1rem"}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:"0.4rem"}}>
+            <span style={{fontSize:"0.68rem",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.09em",color:c}}>{type}</span>
+            <span style={{fontFamily:"'DM Mono',monospace",fontSize:"0.78rem",fontWeight:700,color:c}}>{fmtCur(total,cur)}/mo</span>
+          </div>
+          {items.map(f=>row(<>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:600,fontSize:"0.875rem"}}>{f.name}</div>
+              <div style={{fontSize:"0.72rem",color:T.muted}}>{f.category}{f.notes&&` · ${f.notes}`}</div>
+            </div>
+            <span style={{fontFamily:"'DM Mono',monospace",fontWeight:800,fontSize:"0.875rem",color:c,flexShrink:0}}>{fmtCur(f.amount,cur)}</span>
+            <Btn size="sm" variant="ghost" onClick={()=>openEdit("finances",f)}><Icon name="edit" size={11}/></Btn>
+            <Btn size="sm" variant="danger" onClick={()=>del("finances",f.id)}><Icon name="trash" size={11}/></Btn>
+          </>))}
+        </div>;
+      })}
+    </div>
+  );
+
+  const Family=()=>(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.75rem"}}>
+        <h2 style={{margin:0,fontSize:"1.1rem",fontWeight:800}}>Family</h2>
+        <Btn size="sm" onClick={()=>openAdd("family")}><Icon name="plus" size={12}/> Add</Btn>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.6rem"}}>
+        {data.family.map(f=>(
+          <div key={f.id} style={{background:T.surface,border:`1px solid ${f.colour||T.border}33`,borderRadius:"12px",padding:"1rem"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"0.6rem",marginBottom:"0.75rem"}}>
+              <div style={{width:"34px",height:"34px",borderRadius:"50%",background:`${f.colour||T.accent}22`,border:`2px solid ${f.colour||T.accent}`,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:"1rem",flexShrink:0}}>
+                {f.name.charAt(0)}
+              </div>
+              <div style={{minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:"0.875rem",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{f.name}</div>
+                <div style={{fontSize:"0.7rem",color:T.muted}}>{f.relation}</div>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:"0.4rem"}}>
+              <Btn size="sm" variant="ghost" onClick={()=>openEdit("family",f)}><Icon name="edit" size={11}/></Btn>
+              {f.id!==1&&<Btn size="sm" variant="danger" onClick={()=>del("family",f.id)}><Icon name="trash" size={11}/></Btn>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  const Settings=()=>(
+    <div style={{display:"flex",flexDirection:"column",gap:"0.9rem"}}>
+      <h2 style={{margin:0,fontSize:"1.1rem",fontWeight:800}}>Settings & Security</h2>
+      {card(<>
+        <div style={{display:"flex",gap:"0.5rem",alignItems:"flex-start",padding:"0.75rem",background:"rgba(74,222,128,0.05)",border:"1px solid rgba(74,222,128,0.15)",borderRadius:"10px",marginBottom:"0.9rem"}}>
+          <Icon name="shield" size={15} style={{color:T.good,marginTop:"1px",flexShrink:0}}/>
+          <div>
+            <div style={{fontWeight:700,fontSize:"0.85rem",marginBottom:"0.2rem"}}>AES-256-GCM Encrypted</div>
+            <div style={{fontSize:"0.75rem",color:T.muted,lineHeight:1.6}}>PBKDF2 · 310,000 iterations · SHA-256 · Key never leaves device</div>
+          </div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:"0.5rem"}}>
+          <Btn variant="ghost" fullWidth onClick={exportVault}><Icon name="download" size={13}/> Export Encrypted Backup</Btn>
+          <Btn variant="ghost" fullWidth onClick={()=>importRef.current.click()}><Icon name="upload" size={13}/> Restore Backup</Btn>
+          <input ref={importRef} type="file" accept=".vault" style={{display:"none"}} onChange={importVault}/>
+          <Btn variant="danger" fullWidth onClick={lock}><Icon name="lock" size={13}/> Lock Vault Now</Btn>
+        </div>
+        <p style={{margin:"0.75rem 0 0",fontSize:"0.72rem",color:T.muted}}>⚠ If you lose your passphrase, your data cannot be recovered. Always keep an encrypted backup.</p>
+      </>)}
+      {card(<>
+        <Field label="Currency"><select style={iS} value={cur} onChange={e=>upd(d=>({...d,settings:{...d.settings,currency:e.target.value}}))}>
+          {["£","$","€","¥","A$","C$"].map(c=><option key={c}>{c}</option>)}
+        </select></Field>
+        <Field label="Alert window (days)"><input style={iS} type="number" min="7" max="365" value={data.settings?.notifyDays||60}
+          onChange={e=>upd(d=>({...d,settings:{...d.settings,notifyDays:parseInt(e.target.value)}}))}/></Field>
+      </>)}
+      {card(<>
+        <p style={{margin:"0 0 0.6rem",fontSize:"0.68rem",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.09em",color:T.accent}}>Privacy Guarantee</p>
+        <ul style={{margin:0,paddingLeft:"1.1rem",color:T.muted,fontSize:"0.8rem",lineHeight:2}}>
+          <li>All data encrypted on this device only</li>
+          <li>No accounts, no cloud, no servers</li>
+          <li>Deal Finder sends only item name + category</li>
+          <li>No analytics, tracking, or ads</li>
+        </ul>
+      </>)}
+      {saving&&<p style={{textAlign:"center",color:T.muted,fontSize:"0.75rem"}}>Encrypting and saving…</p>}
+    </div>
+  );
+
+  // ── FORM MODALS ────────────────────────────────────────
+  const SubModal=()=>(
+    <Modal title={modal.item?"Edit Subscription":"Add Subscription"} onClose={closeModal}>
+      <Field label="Name"><input style={iS} value={form.name||""} onChange={e=>updF("name",e.target.value)} placeholder="Netflix"/></Field>
+      <Field label="Category"><input style={iS} value={form.category||""} onChange={e=>updF("category",e.target.value)} placeholder="Entertainment"/></Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.6rem"}}>
+        <Field label={`Cost (${cur})`}><input style={iS} type="number" step="0.01" value={form.cost||""} onChange={e=>updF("cost",parseFloat(e.target.value))}/></Field>
+        <Field label="Cycle"><select style={iS} value={form.cycle||"monthly"} onChange={e=>updF("cycle",e.target.value)}>
+          {["weekly","monthly","quarterly","annual"].map(c=><option key={c}>{c}</option>)}
+        </select></Field>
+      </div>
+      <Field label="Renewal Date"><input style={iS} type="date" value={form.renewalDate||""} onChange={e=>updF("renewalDate",e.target.value)}/></Field>
+      <Field label="Auto-Renew"><select style={iS} value={form.autoRenew?"yes":"no"} onChange={e=>updF("autoRenew",e.target.value==="yes")}>
+        <option value="yes">Yes</option><option value="no">No — manual</option>
+      </select></Field>
+      <Field label="Family Member"><select style={iS} value={form.familyMember||""} onChange={e=>updF("familyMember",e.target.value)}>
+        <option value="">Anyone</option>
+        {data.family.map(f=><option key={f.id} value={f.name}>{f.name}</option>)}
+      </select></Field>
+      <Field label="Notes"><input style={iS} value={form.notes||""} onChange={e=>updF("notes",e.target.value)}/></Field>
+      {(form.priceHistory||[]).length>0&&<Sparkline history={form.priceHistory} current={form.cost||0} name={form.name||""}/>}
+      <Btn fullWidth onClick={()=>saveItem("subscriptions")} style={{marginTop:"0.25rem"}}>{modal.item?"Save":"Add Subscription"}</Btn>
+    </Modal>
+  );
+
+  const ExpModal=()=>(
+    <Modal title={modal.item?"Edit Expiry":"Add Expiry"} onClose={closeModal}>
+      <Field label="Name"><input style={iS} value={form.name||""} onChange={e=>updF("name",e.target.value)} placeholder="Car Insurance"/></Field>
+      <Field label="Category"><select style={iS} value={form.category||"Documents"} onChange={e=>updF("category",e.target.value)}>
+        {["Documents","Insurance","Vehicle","Health","Home","Finance","Other"].map(c=><option key={c}>{c}</option>)}
+      </select></Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.6rem"}}>
+        <Field label="Expiry Date"><input style={iS} type="date" value={form.expiryDate||""} onChange={e=>updF("expiryDate",e.target.value)}/></Field>
+        <Field label="Alert (days before)"><input style={iS} type="number" value={form.reminderDays||30} onChange={e=>updF("reminderDays",parseInt(e.target.value))}/></Field>
+      </div>
+      <Field label="Family Member"><select style={iS} value={form.familyMember||""} onChange={e=>updF("familyMember",e.target.value)}>
+        <option value="">Anyone</option>
+        {data.family.map(f=><option key={f.id} value={f.name}>{f.name}</option>)}
+      </select></Field>
+      <Field label="Notes"><input style={iS} value={form.notes||""} onChange={e=>updF("notes",e.target.value)}/></Field>
+      <Field label="Attachments"><DocAttacher attachments={form.attachments||[]} onChange={v=>updF("attachments",v)}/></Field>
+      <Btn fullWidth onClick={()=>saveItem("expiries")} style={{marginTop:"0.25rem"}}>{modal.item?"Save":"Add Expiry"}</Btn>
+    </Modal>
+  );
+
+  const EventModal=()=>(
+    <Modal title={modal.item?"Edit Event":"Add Event"} onClose={closeModal}>
+      <Field label="Name"><input style={iS} value={form.name||""} onChange={e=>updF("name",e.target.value)} placeholder="Self Assessment deadline"/></Field>
+      <Field label="Category"><select style={iS} value={form.category||"Finance"} onChange={e=>updF("category",e.target.value)}>
+        {["Finance","Vehicle","Health","Work","Home","Legal","Travel","Other"].map(c=><option key={c}>{c}</option>)}
+      </select></Field>
+      <Field label="Date"><input style={iS} type="date" value={form.date||""} onChange={e=>updF("date",e.target.value)}/></Field>
+      <Field label="Recurring"><select style={iS} value={form.recurring?"yes":"no"} onChange={e=>updF("recurring",e.target.value==="yes")}><option value="no">One-off</option><option value="yes">Annual</option></select></Field>
+      <Field label="Notes"><input style={iS} value={form.notes||""} onChange={e=>updF("notes",e.target.value)}/></Field>
+      <Btn fullWidth onClick={()=>saveItem("events")} style={{marginTop:"0.25rem"}}>{modal.item?"Save":"Add Event"}</Btn>
+    </Modal>
+  );
+
+  const FinanceModal=()=>(
+    <Modal title={modal.item?"Edit Finance Item":"Add Finance Item"} onClose={closeModal}>
+      <Field label="Name"><input style={iS} value={form.name||""} onChange={e=>updF("name",e.target.value)} placeholder="Mortgage"/></Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.6rem"}}>
+        <Field label="Type"><select style={iS} value={form.type||"expense"} onChange={e=>updF("type",e.target.value)}>
+          <option value="income">Income</option><option value="expense">Expense</option><option value="savings">Savings</option>
+        </select></Field>
+        <Field label="Category"><input style={iS} value={form.category||""} onChange={e=>updF("category",e.target.value)} placeholder="Housing"/></Field>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.6rem"}}>
+        <Field label={`Amount (${cur})/mo`}><input style={iS} type="number" step="0.01" value={form.amount||""} onChange={e=>updF("amount",parseFloat(e.target.value))}/></Field>
+        <Field label="Due Day"><input style={iS} type="number" min="1" max="31" value={form.dueDay||1} onChange={e=>updF("dueDay",parseInt(e.target.value))}/></Field>
+      </div>
+      <Field label="Notes"><input style={iS} value={form.notes||""} onChange={e=>updF("notes",e.target.value)}/></Field>
+      <Btn fullWidth onClick={()=>saveItem("finances")} style={{marginTop:"0.25rem"}}>{modal.item?"Save":"Add Item"}</Btn>
+    </Modal>
+  );
+
+  const FamilyModal=()=>(
+    <Modal title={modal.item?"Edit Member":"Add Family Member"} onClose={closeModal}>
+      <Field label="Name"><input style={iS} value={form.name||""} onChange={e=>updF("name",e.target.value)} placeholder="Jane"/></Field>
+      <Field label="Relation"><input style={iS} value={form.relation||""} onChange={e=>updF("relation",e.target.value)} placeholder="Partner · Child · Parent"/></Field>
+      <Field label="Date of Birth (optional)"><input style={iS} type="date" value={form.dob||""} onChange={e=>updF("dob",e.target.value)}/></Field>
+      <Field label="Colour"><input style={{...iS,height:"44px"}} type="color" value={form.colour||"#7c9dff"} onChange={e=>updF("colour",e.target.value)}/></Field>
+      <Btn fullWidth onClick={()=>saveItem("family")} style={{marginTop:"0.25rem"}}>{modal.item?"Save":"Add Member"}</Btn>
+    </Modal>
+  );
+
+  const views = {dashboard:<Dashboard/>,subscriptions:<Subscriptions/>,expiries:<Expiries/>,alerts:<Alerts/>,events:<Events/>,finances:<Finances/>,family:<Family/>,settings:<Settings/>};
+  const viewTitles = {dashboard:"Overview",subscriptions:"Subscriptions",expiries:"Expiry Tracker",alerts:"Alerts",events:"Events",finances:"Finances",family:"Family",settings:"Settings"};
+
+  return (
+    <>
+      {/* Header */}
+      <header style={{background:T.surface,borderBottom:`1px solid ${T.border}`,position:"sticky",top:0,zIndex:200,paddingTop:"env(safe-area-inset-top)"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 1rem",height:"50px"}}>
+          <div style={{fontWeight:800,fontSize:"1.05rem",letterSpacing:"-0.03em"}}>
+            <span style={{color:T.accent}}>life</span>admin
+            {saving&&<span style={{fontSize:"0.62rem",color:T.muted,marginLeft:"0.5rem",fontWeight:400}}>saving…</span>}
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:"0.5rem"}}>
+            <span style={{fontSize:"0.78rem",color:T.muted,fontWeight:600}}>{viewTitles[view]||""}</span>
+            <button onClick={lock} style={{background:"none",border:`1px solid ${T.border}`,borderRadius:"7px",padding:"0.28rem 0.55rem",color:T.muted,cursor:"pointer",display:"flex",alignItems:"center",gap:"0.3rem",fontSize:"0.72rem",fontFamily:"'Syne',sans-serif"}}>
+              <Icon name="lock" size={11}/> Lock
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Content */}
+      <main style={{padding:"1rem 1rem 5.5rem",maxWidth:"600px",margin:"0 auto"}} key={view} className="fade">
+        {views[view]||<Dashboard/>}
+      </main>
+
+      {/* Bottom Nav */}
+      <BottomNav view={view} setView={handleSetView} urgentCount={urgentCount}/>
+
+      {/* More Menu */}
+      {showMore&&<MoreMenu setView={v=>{setView(v);}} onClose={()=>setShowMore(false)}/>}
+
+      {/* Modals */}
+      {modal?.type==="subscriptions"&&<SubModal/>}
+      {modal?.type==="expiries"&&<ExpModal/>}
+      {modal?.type==="events"&&<EventModal/>}
+      {modal?.type==="finances"&&<FinanceModal/>}
+      {modal?.type==="family"&&<FamilyModal/>}
+      {dealItem&&<DealFinder item={dealItem} onClose={()=>setDealItem(null)}/>}
+      {showImport&&<BankImport onImport={handleBankImport} onClose={()=>setShowImport(false)}/>}
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+
+  <!-- Service Worker registration (PWA offline support) -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>
